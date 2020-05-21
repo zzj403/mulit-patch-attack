@@ -1,25 +1,20 @@
 # mulit-patch-attack
-The useful part is PatchTransformer and PatchApplier
+First init PatchTransformer by
+
+    PatchTransformer = PatchTransformer()
 
 After init PatchTransformer, PatchApplier, you can use:
 
-adv_batch = PatchTransformer(adv_patch_list, patch_location_list, img_size, do_rotate=False, rand_loc=False)
-
-to get mask Tensor adv_batch
-
-and use PatchApplier to get img_patched
-
-img_patched = PatchApplier(img_batch, adv_batch)
+    img_patched = PatchTransformer(adv_patch_list, patch_location_list, img_size, img_clean)
 
 
-adv_patch_list : a list of patch tensor, size[3,?,?]
+to get patched image
 
-patch_location_list : a list of patch location tensor, size[2]
 
-img_size: a value,eg:608
+    adv_patch_list : a list of patch tensor, size[3,?,?]
 
-do_rotate: useless,please don't use
+    patch_location_list : a list of patch location tensor, size[2]
 
-rand_loc: useless,please don't use
+    img_size : a value, eg:608
 
-img_batch : batch of img, size[batch_size,3,?,?]
+    img_clean : clean image, size[1,3,?,?] #!!important!: NOT [3,?,?]
