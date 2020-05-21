@@ -15,167 +15,19 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from tool.darknet2pytorch import Darknet
 
-from median_pool import MedianPool2d
+
 
 print('starting test read')
 im = Image.open('data/horse.jpg').convert('RGB')
 print('img read!')
 
 
-class MaxProbExtractor(nn.Module):
-    """MaxProbExtractor: extracts max class probability for class from YOLO output.
-
-    Module providing the functionality necessary to extract the max class probability for one class from YOLO output.
-
-    """
-
-    def __init__(self, cls_id, num_cls, config):
-        super(MaxProbExtractor, self).__init__()
-        self.cls_id = cls_id
-        self.num_cls = num_cls
-        self.config = config
-
-    def forward(self, YOLOoutput):
-        # get values neccesary for transformation
-        # YOLOoutput is a list and
-        # 0:[batchsize,255,76,76]
-        # 1:[batchsize,255,38,38]
-        # 2:[batchsize,255,19,19]
-        num_anchors = 3  # zzj! you should change here
-        num_classes = 80  # zzj! you should change here
-
-        output_all = torch.Tensor()
-        output_all = output_all.cuda()
-        for i in range(len(YOLOoutput)):
-            YOLOoutput_t = YOLOoutput[i]
-            if YOLOoutput_t.dim() == 3:
-                YOLOoutput_t = YOLOoutput_t.unsqueeze(0)
-            batch = YOLOoutput_t.size(0)
-            assert (YOLOoutput_t.size(1) == (5 + self.num_cls ) * num_anchors)
-
-            # ------------------for v4-----------------
-            output = YOLOoutput_t
-            h = output.shape[2]
-            w = output.shape[3]
-
-            output = output.reshape(batch, num_anchors, 5 + num_classes, h * w)  # [batch, 3, 85, 361]
-
-            output = output.transpose(1, 2).contiguous()  # [batch, 85, 3, 361]
-            output = output.reshape(batch, 5 + num_classes,  num_anchors * h * w)  # [batch, 85, 3*361]
-            output_all = torch.cat([output_all, output], dim=2)
-        # output = ndarray:(85, 17328)
-
-
-        '''
-        # ------------------for v2-----------------
-        h = YOLOoutput.size(2)
-        w = YOLOoutput.size(3)
-        # transform the output tensor from [batch, 425, 19, 19] to [batch, 80, 1805]
-        output = YOLOoutput.view(batch, 5, 5 + self.num_cls , h * w)  # [batch, 5, 85, 361]
-        output = output.transpose(1, 2).contiguous()  # [batch, 85, 5, 361]
-        output = output.view(batch, 5 + self.num_cls , 5 * h * w)  # [batch, 85, 1805]'''
-
-
-
-        # -------------speed up-------------------
-        '''
-              output = output_all
-              output_objectness = torch.sigmoid(output[:, 4, :])  # [batch, 1805]
-              output = output[:, 5:5 + self.num_cls , :]  # [batch, 80, 1805]
-              # perform softmax to normalize probabilities for object classes to [0,1]
-
-              normal_confs = torch.nn.Softmax(dim=1)(output)
-              # we only care for probabilities of the class of interest (person)
-              confs_for_class = normal_confs[:, self.cls_id, :]
-              confs_if_object = output_objectness #confs_for_class * output_objectness
-              confs_if_object = confs_for_class * output_objectness
-              confs_if_object = self.config.loss_target(output_objectness, confs_for_class)
-              # find the max probability for person
-              max_conf, max_conf_idx = torch.max(confs_if_object, dim=1)'''
-        output = output_all
-        output_objectness = output[:, 4, :]  # [batch, 1805]
-        # find the max probability for person
-        max_conf, max_conf_idx = torch.max(output_objectness, dim=1)
-        max_conf = torch.sigmoid(max_conf)
-
-
-
-
-        return max_conf
-
-class NPSCalculator(nn.Module):
-    """NMSCalculator: calculates the non-printability score of a patch.
-
-    Module providing the functionality necessary to calculate the non-printability score (NMS) of an adversarial patch.
-
-    """
-
-    def __init__(self, printability_file, patch_side):
-        super(NPSCalculator, self).__init__()
-        self.printability_array = nn.Parameter(self.get_printability_array(printability_file, patch_side),requires_grad=False)
-
-    def forward(self, adv_patch):
-        # calculate euclidian distance between colors in patch and colors in printability_array
-        # square root of sum of squared difference
-        color_dist = (adv_patch - self.printability_array+0.000001)
-        color_dist = color_dist ** 2
-        color_dist = torch.sum(color_dist, 1)+0.000001
-        color_dist = torch.sqrt(color_dist)
-        # only work with the min distance
-        color_dist_prod = torch.min(color_dist, 0)[0] #test: change prod for min (find distance to closest color)
-        # calculate the nps by summing over all pixels
-        nps_score = torch.sum(color_dist_prod,0)
-        nps_score = torch.sum(nps_score,0)
-        return nps_score/torch.numel(adv_patch)
-
-    def get_printability_array(self, printability_file, side):
-        printability_list = []
-
-        # read in printability triplets and put them in a list
-        with open(printability_file) as f:
-            for line in f:
-                printability_list.append(line.split(","))
-
-        printability_array = []
-        for printability_triplet in printability_list:
-            printability_imgs = []
-            red, green, blue = printability_triplet
-            printability_imgs.append(np.full((side, side), red))
-            printability_imgs.append(np.full((side, side), green))
-            printability_imgs.append(np.full((side, side), blue))
-            printability_array.append(printability_imgs)
-
-        printability_array = np.asarray(printability_array)
-        printability_array = np.float32(printability_array)
-        pa = torch.from_numpy(printability_array)
-        return pa
-
-
-class TotalVariation(nn.Module):
-    """TotalVariation: calculates the total variation of a patch.
-
-    Module providing the functionality necessary to calculate the total vatiation (TV) of an adversarial patch.
-
-    """
-
-    def __init__(self):
-        super(TotalVariation, self).__init__()
-
-    def forward(self, adv_patch):
-        # bereken de total variation van de adv_patch
-        tvcomp1 = torch.sum(torch.abs(adv_patch[:, :, 1:] - adv_patch[:, :, :-1]+0.000001),0)
-        tvcomp1 = torch.sum(torch.sum(tvcomp1,0),0)
-        tvcomp2 = torch.sum(torch.abs(adv_patch[:, 1:, :] - adv_patch[:, :-1, :]+0.000001),0)
-        tvcomp2 = torch.sum(torch.sum(tvcomp2,0),0)
-        tv = tvcomp1 + tvcomp2
-        return tv/torch.numel(adv_patch)
-
 def affine(theta, img_size, patch_aff):
     grid = F.affine_grid(theta, [theta.shape[0], 3, img_size, img_size])
     affine_result = F.grid_sample(patch_aff, grid).unsqueeze(0)
     return affine_result
+
 
 class PatchTransformer(nn.Module):
     """PatchTransformer: transforms batch of patches
@@ -184,90 +36,26 @@ class PatchTransformer(nn.Module):
     contrast, adding random amount of noise, and rotating randomly. Resizes patches according to as size based on the
     batch of labels, and pads them to the dimension of an image.
 
+    Module providing the functionality necessary to transform a list of patches, put them at the location
+    defined by a list of location.
+    
+    Output the img which is patched
+
     """
 
     def __init__(self):
         super(PatchTransformer, self).__init__()
-        self.min_contrast = 0.8
-        self.max_contrast = 1.2
-        self.min_brightness = -0.1
-        self.max_brightness = 0.1
-        self.noise_factor = 0.10
-        self.minangle = -20 / 180 * math.pi
-        self.maxangle = 20 / 180 * math.pi
-        self.medianpooler = MedianPool2d(7, same=True)
-        '''
-        kernel = torch.cuda.FloatTensor([[0.003765, 0.015019, 0.023792, 0.015019, 0.003765],                                                                                    
-                                         [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],                                                                                    
-                                         [0.023792, 0.094907, 0.150342, 0.094907, 0.023792],                                                                                    
-                                         [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],                                                                                    
-                                         [0.003765, 0.015019, 0.023792, 0.015019, 0.003765]])
-        self.kernel = kernel.unsqueeze(0).unsqueeze(0).expand(3,3,-1,-1)
-        '''
 
-
-
-    # ONLY for TEST!!!!!
-    # def forward(self, adv_patch, lab_batch, img_size, do_rotate=True, rand_loc=True):
-
-    def forward(self, adv_patch_list, patch_location_list, img_size, do_rotate=False, rand_loc=False):
-
-        # Determine size of padding
-        # pad = (img_size - adv_patch.size(-1)) / 2
-        # Make a batch of patches
-        # adv_patch = adv_patch.unsqueeze(0)  # .unsqueeze(0)
-        # adv_batch = adv_patch.expand(lab_batch.size(0), lab_batch.size(1), -1, -1, -1)
-        # batch_size = torch.Size((lab_batch.size(0), lab_batch.size(1)))
-
-        '''
-        # Contrast, brightness and noise transforms
-
-        # Create random contrast tensor
-        contrast = torch.cuda.FloatTensor(batch_size).uniform_(self.min_contrast, self.max_contrast)
-        contrast = contrast.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        contrast = contrast.expand(-1, -1, adv_batch.size(-3), adv_batch.size(-2), adv_batch.size(-1))
-        contrast = contrast.cuda()
-
-        # Create random brightness tensor
-        brightness = torch.cuda.FloatTensor(batch_size).uniform_(self.min_brightness, self.max_brightness)
-        brightness = brightness.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        brightness = brightness.expand(-1, -1, adv_batch.size(-3), adv_batch.size(-2), adv_batch.size(-1))
-        brightness = brightness.cuda()
-
-        # Create random noise tensor
-        noise = torch.cuda.FloatTensor(adv_batch.size()).uniform_(-1, 1) * self.noise_factor
-
-        # Apply contrast/brightness/noise, clamp
-        adv_batch = adv_batch * contrast + brightness + noise'''
+    def forward(self, adv_patch_list, patch_location_list, img_size, img_clean):
 
         # clamp the range of patch pixel
         for patch_item_index in range(len(adv_patch_list)):
             patch_item = adv_patch_list[patch_item_index]
             # adv_patch_list[patch_item_index] = torch.clamp(patch_item, 0.000001, 0.99999)
 
-        '''
-        # Where the label class_id is 1 we don't want a patch (padding) --> fill mask with zero's
-        cls_ids = torch.narrow(lab_batch, 2, 0, 1)
-        cls_mask = cls_ids.expand(-1, -1, 3)
-        cls_mask = cls_mask.unsqueeze(-1)
-        cls_mask = cls_mask.expand(-1, -1, -1, adv_batch.size(3))
-        cls_mask = cls_mask.unsqueeze(-1)
-        cls_mask = cls_mask.expand(-1, -1, -1, -1, adv_batch.size(4))
-        msk_batch = torch.cuda.FloatTensor(cls_mask.size()).fill_(1) - cls_mask'''
-
-        # create a mask for patches is wrong
-        # we should create mask for image
         assert len(adv_patch_list) == len(patch_location_list)
 
-        pad = img_size
-        # mypad_for_img = nn.ConstantPad2d((pad, pad, pad, pad), 0)
-        msk_for_img_big = torch.cuda.FloatTensor(len(adv_patch_list), 3, img_size*3, img_size*3).fill_(0)
-        msk_for_img_affine = torch.cuda.FloatTensor(len(adv_patch_list), 3, img_size, img_size).fill_(0)
-        msk_for_img_affine2 = torch.cuda.FloatTensor()
-        # msk_for_img_big = mypad_for_img(msk_for_img)
-
-
-        # affine
+        # prepare FloatTensor that will be used in affine
         theta = torch.cuda.FloatTensor(len(adv_patch_list), 2, 3).fill_(0)
         patch_aff_total = torch.cuda.FloatTensor()
         patch_mask_aff_total = torch.cuda.FloatTensor()
@@ -279,149 +67,61 @@ class PatchTransformer(nn.Module):
             patch_width = adv_patch_list[i].shape[2]
             assert patch_height <= img_size
             assert patch_width <= img_size
+
             # left_up_corner
             patch_x = int(patch_location_list[i][0]*img_size)
             patch_y = int(patch_location_list[i][1]*img_size)
             assert patch_x <= img_size
             assert patch_y <= img_size
 
-            patch_x_big = patch_x + img_size
-            patch_y_big = patch_y + img_size
+            # Use affine translation to put the patch to the desired location
 
-            # msk_for_img_big[patch_x_big:patch_height, patch_y_big:patch_width, :] = adv_patch_list[i]
-            # need a patch go in method
-            '''
-            # zzj:严格的像素替换
-            for k1 in range(patch_height):
-                for k2 in range(patch_width):
-                    for k3 in range(3):
-                        msk_for_img_big[i,k3, patch_x_big+k1, patch_y_big+k2] = adv_patch_list[i][k3, k1, k2]'''
-
-            # try to use affine
-            # Theta = rotation,rescale matrix
-
-            # zzj:快速的仿射变换
-            # zzj:注意存在边缘擦除的可能性
+            # Prepare theta, affine matrix for i-th
             theta[i, 0, 0] = 1
             theta[i, 0, 1] = 0
-            theta[i,0, 2] = -patch_location_list[i][0]
-            # theta[i, 0, 2] = -0.1*i
+            theta[i, 0, 2] = -patch_location_list[i][0]
+
             theta[i, 1, 0] = 0
             theta[i, 1, 1] = 1
-            theta[i,1, 2] = -patch_location_list[i][1]
-            # theta[i, 1, 2] = 0
+            theta[i, 1, 2] = -patch_location_list[i][1]
 
-            # affine preprocess
+            # Pre-process for affine
+            # Complete the patch to the same size as img size, so the affine precess won't be wrong
             patch_aff = adv_patch_list[i]
-            patch_aff = torch.cat([patch_aff, torch.cuda.FloatTensor(3, img_size-patch_height, patch_width).fill_(0)], 1)
+            patch_aff = torch.cat([patch_aff, torch.cuda.FloatTensor(3, img_size-patch_height, patch_width).fill_(0)],
+                                  1)
             patch_aff = torch.cat([patch_aff, torch.cuda.FloatTensor(3, img_size, img_size-patch_width).fill_(0)],
                                   2)
             patch_aff = patch_aff.unsqueeze(0)
 
-            # patch_mask_aff = torch.cuda.FloatTensor(adv_patch_list[i].size()).fill_(1)
-            # patch_mask_aff = torch.cat([patch_mask_aff, torch.cuda.FloatTensor(3, img_size-patch_height, patch_width).fill_(0)], 1)
-            # patch_mask_aff = torch.cat([patch_mask_aff, torch.cuda.FloatTensor(3, img_size, img_size-patch_width).fill_(0)],
-            #                       2)
-            # patch_mask_aff = patch_mask_aff.unsqueeze(0)
+            # Create a mask to cut-off the black edge.
+            # The black edge is caused by Bilinear interpolation when affine.
             patch_mask_aff_ones = torch.ones_like(patch_aff)
             patch_mask_aff_zeros = torch.zeros_like(patch_aff)
             patch_mask_aff = torch.where(patch_aff > 0, patch_mask_aff_ones, patch_mask_aff_zeros)
 
+            # storage the patch_aff and patch_mask_aff to a large multi-channel tensor
             patch_mask_aff_total = torch.cat([patch_mask_aff_total, patch_mask_aff], dim=0)
-
             patch_aff_total = torch.cat([patch_aff_total, patch_aff], dim=0)
-            # affine_result = affine(theta, img_size, patch_aff)
-            # grid = F.affine_grid(theta.unsqueeze(0), [1, 3, , img_size])
-            # grid_old = grid
-            # affine_result = F.grid_sample(patch_aff.unsqueeze(0), grid).unsqueeze(0)
+
+        # use theta and patch_aff_total to affine all patches.
+        # Each patch has its own result
         patch_affine2 = affine(theta, img_size, patch_aff_total)
+
+        # Use mask to cut off the black edge
         patch_mask_affine2 = affine(theta, img_size, patch_mask_aff_total)
         patch_mask_affine2_black = torch.cuda.FloatTensor(patch_mask_affine2.size()).fill_(0)
-        # patch_affine2 = torch.clamp(patch_affine2, 0.000001, 0.999999)
-
         patch_mask_affine2 = torch.where((patch_mask_affine2 == 1), patch_mask_affine2, patch_mask_affine2_black)
+
+        # apply cut-off
         patch_affine2 = patch_affine2 * patch_mask_affine2
+        
+        # apply patches to the image
+        advs = torch.unbind(patch_affine2, 1)
+        for adv in advs:
+            img_patched = torch.where((adv == 0), img_clean, adv)  # zzj:注意存在边缘擦除的可能性
 
-        # msk_for_img_small = msk_for_img_big[:, :, img_size:2*img_size, img_size:2*img_size]        # msk_for_img_small = msk_for_img_small.permute(2, 0, 1)
-        # msk_for_img_small = msk_for_img_small.unsqueeze(0)
-
-            # if patch_height + patch_x < img_size and patch_width + patch_y < img_size:
-
-
-
-
-        '''
-        # Pad patch and mask to image dimensions
-        mypad = nn.ConstantPad2d((int(pad + 0.5), int(pad), int(pad + 0.5), int(pad)), 0)
-        adv_batch = mypad(adv_batch)
-        msk_batch = mypad(msk_batch)
-
-        # Rotation and rescaling transforms
-
-        anglesize = (lab_batch.size(0) * lab_batch.size(1))
-        if do_rotate:
-            angle = torch.cuda.FloatTensor(anglesize).uniform_(self.minangle, self.maxangle)
-        else:
-            angle = torch.cuda.FloatTensor(anglesize).fill_(0)
-
-        # Resizes and rotates
-        current_patch_size = adv_patch.size(-1)
-        lab_batch_scaled = torch.cuda.FloatTensor(lab_batch.size()).fill_(0)
-        lab_batch_scaled[:, :, 1] = lab_batch[:, :, 1] * img_size
-        lab_batch_scaled[:, :, 2] = lab_batch[:, :, 2] * img_size
-        lab_batch_scaled[:, :, 3] = lab_batch[:, :, 3] * img_size
-        lab_batch_scaled[:, :, 4] = lab_batch[:, :, 4] * img_size
-        target_size = torch.sqrt(
-            ((lab_batch_scaled[:, :, 3].mul(0.2)) ** 2) + ((lab_batch_scaled[:, :, 4].mul(0.2)) ** 2))
-        target_x = lab_batch[:, :, 1].view(np.prod(batch_size))
-        target_y = lab_batch[:, :, 2].view(np.prod(batch_size))
-        targetoff_x = lab_batch[:, :, 3].view(np.prod(batch_size))
-        targetoff_y = lab_batch[:, :, 4].view(np.prod(batch_size))
-        if (rand_loc):
-            off_x = targetoff_x * (torch.cuda.FloatTensor(targetoff_x.size()).uniform_(-0.4, 0.4))
-            target_x = target_x + off_x
-            off_y = targetoff_y * (torch.cuda.FloatTensor(targetoff_y.size()).uniform_(-0.4, 0.4))
-            target_y = target_y + off_y
-        target_y = target_y - 0.05
-        scale = target_size / current_patch_size
-        scale = scale.view(anglesize)
-
-        s = adv_batch.size()
-        adv_batch = adv_batch.view(s[0] * s[1], s[2], s[3], s[4])
-        msk_batch = msk_batch.view(s[0] * s[1], s[2], s[3], s[4])
-
-        tx = (-target_x + 0.5) * 2
-        ty = (-target_y + 0.5) * 2
-        sin = torch.sin(angle)
-        cos = torch.cos(angle)
-
-        # Theta = rotation,rescale matrix
-        theta = torch.cuda.FloatTensor(anglesize, 2, 3).fill_(0)
-        theta[:, 0, 0] = cos / scale
-        theta[:, 0, 1] = sin / scale
-        theta[:, 0, 2] = tx * cos / scale + ty * sin / scale
-        theta[:, 1, 0] = -sin / scale
-        theta[:, 1, 1] = cos / scale
-        theta[:, 1, 2] = -tx * sin / scale + ty * cos / scale
-
-        b_sh = adv_batch.shape
-        grid = F.affine_grid(theta, adv_batch.shape)
-
-        adv_batch_t = F.grid_sample(adv_batch, grid)
-        msk_batch_t = F.grid_sample(msk_batch, grid)
-
-        adv_batch_t = adv_batch_t.view(s[0], s[1], s[2], s[3], s[4])
-        msk_batch_t = msk_batch_t.view(s[0], s[1], s[2], s[3], s[4])
-
-        adv_batch_t = torch.clamp(adv_batch_t, 0.000001, 0.999999)
-        # img = msk_batch_t[0, 0, :, :, :].detach().cpu()
-        # img = transforms.ToPILImage()(img)
-        # img.show()
-        # exit()
-
-        return adv_batch_t * msk_batch_t'''
-        # return msk_for_img_small
-        return patch_affine2
+        return img_patched
 
 
 class PatchApplier(nn.Module):
@@ -561,96 +261,4 @@ class InriaDataset(Dataset):
         return padded_lab
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3:
-        img_dir = sys.argv[1]
-        lab_dir = sys.argv[2]
-
-    else:
-        print('Usage: ')
-        print('  python load_data.py img_dir lab_dir')
-        sys.exit()
-
-    test_loader = torch.utils.data.DataLoader(InriaDataset(img_dir, lab_dir, shuffle=True),
-                                              batch_size=3, shuffle=True)
-
-    cfgfile = "cfg/yolov2.cfg"
-    weightfile = "weights/yolov2.weights"
-    printfile = "non_printability/30values.txt"
-
-    patch_size = 400
-
-    darknet_model = Darknet(cfgfile)
-    darknet_model.load_weights(weightfile)
-    darknet_model = darknet_model.cuda()
-    patch_applier = PatchApplier().cuda()
-    patch_transformer = PatchTransformer().cuda()
-    prob_extractor = MaxProbExtractor(0, 80).cuda()
-    nms_calculator = NMSCalculator(printfile, patch_size)
-    total_variation = TotalVariation()
-    '''
-    img = Image.open('data/horse.jpg').convert('RGB')
-    img = img.resize((darknet_model.width, darknet_model.height))
-    width = img.width
-    height = img.height
-    img = torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes()))
-    img = img.view(height, width, 3).transpose(0, 1).transpose(0, 2).contiguous()
-    img = img.view(1, 3, height, width)
-    img = img.float().div(255.0)
-    img = torch.autograd.Variable(img)
-
-    output = darknet_model(img)
-    '''
-    optimizer = torch.optim.Adam(model.parameters(), lr = 0.0001)
-
-    tl0 = time.time()
-    tl1 = time.time()
-    for i_batch, (img_batch, lab_batch) in enumerate(test_loader):
-        tl1 = time.time()
-        print('time to fetch items: ',tl1-tl0)
-        img_batch = img_batch.cuda()
-        lab_batch = lab_batch.cuda()
-        adv_patch = Image.open('data/horse.jpg').convert('RGB')
-        adv_patch = adv_patch.resize((patch_size, patch_size))
-        transform = transforms.ToTensor()
-        adv_patch = transform(adv_patch).cuda()
-        img_size = img_batch.size(-1)
-        print('transforming patches')
-        t0 = time.time()
-        adv_batch_t = patch_transformer.forward(adv_patch, lab_batch, img_size)
-        print('applying patches')
-        t1 = time.time()
-        img_batch = patch_applier.forward(img_batch, adv_batch_t)
-        img_batch = torch.autograd.Variable(img_batch)
-        img_batch = F.interpolate(img_batch,(darknet_model.height, darknet_model.width))
-        print('running patched images through model')
-        t2 = time.time()
-
-        for obj in gc.get_objects():
-            try:
-                if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                    try:
-                        print(type(obj), obj.size())
-                    except:
-                        pass
-            except:
-                pass
-
-        print(torch.cuda.memory_allocated())
-
-        output = darknet_model(img_batch)
-        print('extracting max probs')
-        t3 = time.time()
-        max_prob = prob_extractor(output)
-        t4 = time.time()
-        nms = nms_calculator.forward(adv_patch)
-        tv = total_variation(adv_patch)
-        print('---------------------------------')
-        print('        patch transformation : %f' % (t1-t0))
-        print('           patch application : %f' % (t2-t1))
-        print('             darknet forward : %f' % (t3-t2))
-        print('      probability extraction : %f' % (t4-t3))
-        print('---------------------------------')
-        print('          total forward pass : %f' % (t4-t0))
-        del img_batch, lab_batch, adv_patch, adv_batch_t, output, max_prob
-        torch.cuda.empty_cache()
-        tl0 = time.time()
+   pass
