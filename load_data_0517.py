@@ -30,14 +30,16 @@ def affine(theta, img_size, patch_aff):
 
 
 class PatchTransformer(nn.Module):
-    """PatchTransformer: transforms a list of patches
+    """PatchTransformer: transforms batch of patches
+
+    Module providing the functionality necessary to transform a batch of patches, randomly adjusting brightness and
+    contrast, adding random amount of noise, and rotating randomly. Resizes patches according to as size based on the
+    batch of labels, and pads them to the dimension of an image.
 
     Module providing the functionality necessary to transform a list of patches, put them at the location
     defined by a list of location.
 
     Output the img which is patched
-    
-    batch is not supported
 
     """
 
@@ -60,7 +62,9 @@ class PatchTransformer(nn.Module):
 
 
         for i in range(len(adv_patch_list)):
-
+            connected_number = connected_domin_detect(adv_patch_list[i])
+            if connected_number > 1:
+                print('ERROR: Too Many connected region!!')
             patch_height = adv_patch_list[i].shape[1]
             patch_width = adv_patch_list[i].shape[2]
             assert patch_height <= img_size
@@ -122,8 +126,41 @@ class PatchTransformer(nn.Module):
 
         return img_patched
 
+def connected_domin_detect(input_img):
+    from skimage import measure
+    # detection
+    input_img_new = (input_img[0]+input_img[1]+input_img[2])
+    ones = torch.cuda.FloatTensor(input_img_new.size()).fill_(1)
+    zeros = torch.cuda.FloatTensor(input_img_new.size()).fill_(0)
+    input_img_background0 = torch.where((input_img[0] == -1), ones, zeros)
+    input_img_background1 = torch.where((input_img[1] == -1), ones, zeros)
+    input_img_background2 = torch.where((input_img[2] == -1), ones, zeros)
+    # whether there is mixed foreground and background pixel in the patch
+    if (input_img_background0==input_img_background1).all() and (input_img_background0==input_img_background2).all():
+        input_map_new = torch.where((input_img_new != -3), ones, zeros)
+        input_map_new = input_map_new.cpu()
+        labels = measure.label(input_map_new[:, :], background=0,connectivity=2)
+        print(labels)
+        label_max_number = np.max(labels)
+        return label_max_number
+    else:
+        print('ERROR! patch content find foreground background mixed pixel like RGB=[0.2,0.43,-1] , '
+              'which is forbidden. Please check the patch and ensure pixels are foreground [>0,>0,>0]'
+              'or background [-1,-1,-1]')
 
 
 
 if __name__ == '__main__':
-    pass
+    img = torch.cuda.FloatTensor(3,10,10).fill_(-1)
+    for i in range(3):
+        for j in range(3):
+            for k in range(3):
+                if i==1 and j==1:
+                    continue
+                img[k, i, j] = 0.5
+                img[k, i+4, j] = 0.4
+                img[k, 3, 0] = 0
+
+
+    y = connected_domin_detect(img)
+    print(y)
