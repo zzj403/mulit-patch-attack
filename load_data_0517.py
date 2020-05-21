@@ -30,16 +30,14 @@ def affine(theta, img_size, patch_aff):
 
 
 class PatchTransformer(nn.Module):
-    """PatchTransformer: transforms batch of patches
-
-    Module providing the functionality necessary to transform a batch of patches, randomly adjusting brightness and
-    contrast, adding random amount of noise, and rotating randomly. Resizes patches according to as size based on the
-    batch of labels, and pads them to the dimension of an image.
+    """PatchTransformer: transforms a list of patches
 
     Module providing the functionality necessary to transform a list of patches, put them at the location
     defined by a list of location.
 
     Output the img which is patched
+    
+    batch is not supported
 
     """
 
@@ -98,7 +96,7 @@ class PatchTransformer(nn.Module):
             # The black edge is caused by Bilinear interpolation when affine.
             patch_mask_aff_ones = torch.ones_like(patch_aff)
             patch_mask_aff_zeros = torch.zeros_like(patch_aff)
-            patch_mask_aff = torch.where(patch_aff > 0, patch_mask_aff_ones, patch_mask_aff_zeros)
+            patch_mask_aff = torch.where(patch_aff >= 0, patch_mask_aff_ones, patch_mask_aff_zeros)
 
             # storage the patch_aff and patch_mask_aff to a large multi-channel tensor
             patch_mask_aff_total = torch.cat([patch_mask_aff_total, patch_mask_aff], dim=0)
@@ -118,8 +116,9 @@ class PatchTransformer(nn.Module):
 
         # apply patches to the image
         advs = torch.unbind(patch_affine2, 1)
+        img_patched = img_clean
         for adv in advs:
-            img_patched = torch.where((adv == 0), img_clean, adv)  # zzj:注意存在边缘擦除的可能性
+            img_patched = torch.where((adv == 0), img_patched, adv)  # zzj:注意存在边缘擦除的可能性
 
         return img_patched
 
