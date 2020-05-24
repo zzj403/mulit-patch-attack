@@ -113,7 +113,7 @@ class PatchTransformer(nn.Module):
         # Use mask to cut off the black edge
         patch_mask_affine2 = affine(theta, img_size, patch_mask_aff_total)
         patch_mask_affine2_black = torch.cuda.FloatTensor(patch_mask_affine2.size()).fill_(0)
-        patch_mask_affine2 = torch.where((patch_mask_affine2 == 1), patch_mask_affine2, patch_mask_affine2_black)
+        patch_mask_affine2 = torch.where((patch_mask_affine2 >= 0.999), patch_mask_affine2, patch_mask_affine2_black)
 
         # apply cut-off
         patch_affine2 = patch_affine2 * patch_mask_affine2
